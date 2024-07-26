@@ -9,7 +9,7 @@ import redis
 import requests
 from dateutil import parser
 from django.core.exceptions import FieldError
-from django.db import DatabaseError, IntegrityError
+from django.db import IntegrityError, DatabaseError
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import generics, status
@@ -17,16 +17,15 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from exam.constants import USER_ALREADY_EXISTS, USER_CREATED_SUCCESSFULLY, EXAM_PREFIX_NOT_FOUND, \
+    MISSING_REQUIRED_FIELD, ALREADY_LOGGED_IN, INVALID_CREDENTIALS
+from .cache import RedisManagerClient
 from .models import Exam, User
 from .serializers import CSVUploadSerializer, ExamSerializer, UserCSVSerializer
+from .utils import exception_handler_decorator
 
-question_bank_uri = os.getenv('QuestionBankAppURI')
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST"),
-    password=os.getenv("REDIS_PASSWORD"),
-    port=os.getenv("REDIS_PORT"),
-    socket_timeout=1  # 1sec
-)
+question_bank_uri = os.getenv('QuestionBankAppURI', "http://127.0.0.1:5012")
+redis_client = RedisManagerClient().client
 
 
 class UserCSVExportView(APIView):
@@ -51,10 +50,19 @@ class UserCSVUploadView(APIView):
     def post(self, request, *args, **kwargs):
         exam_prefix = request.data.get('exam_prefix', '')
         serializer = CSVUploadSerializer(data=request.data)
+
+        if exam_prefix == '' or exam_prefix is None:
+            return Response({
+                        "error": EXAM_PREFIX_NOT_FOUND
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         if serializer.is_valid():
             file = request.FILES['file']
             decoded_file = file.read().decode('utf-8').splitlines()
             reader = csv.DictReader(decoded_file)
+
             try:
                 for row in reader:
                     user = User(
@@ -66,14 +74,30 @@ class UserCSVUploadView(APIView):
                     )
                     user.save()
 
-            except IntegrityError:
-                return Response({"message": "users already exists."},
-                                status=status.HTTP_400_BAD_REQUEST)
+            except IntegrityError as ex:
+                return Response({
+                    "message": USER_ALREADY_EXISTS,
+                    "error": str(ex)
+                },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-            return Response({"message": "users created successfully."},
-                            status=status.HTTP_201_CREATED)
+            except Exception as ex:
+                return Response({
+                    "error": str(ex)
+                },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "message": USER_CREATED_SUCCESSFULLY},
+                status=status.HTTP_201_CREATED
+            )
+
+        return Response(
+            serializer.errors,
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 
 class ExamCreateView(generics.CreateAPIView):
@@ -111,6 +135,7 @@ class LoginAPIView(APIView):
                 try:
                     question_limits = redis_client.get(exam_prefix)
                     time_per_question = redis_client.get(f"tpq:{exam_prefix}")
+                    total_questions = redis_client.get(f"tq:{exam_prefix}")
 
                     if question_limits is None:
                         question_limit = Exam.objects.get(prefix=exam_prefix).no_of_questions
@@ -124,20 +149,31 @@ class LoginAPIView(APIView):
                     else:
                         time_per_question = int(time_per_question)
 
+                    if total_questions is None:
+                        total_questions = Exam.objects.get(prefix=exam_prefix).total_questions
+                        redis_client.set(f"tq:{exam_prefix}", total_questions)
+
+                    else:
+                        total_questions = int(time_per_question)
+
                 except (
                         redis.ConnectionError,
                         redis.TimeoutError,
-                        redis.RedisError
+                        redis.RedisError,
+                        AttributeError
                 ):
-                    question_limit = Exam.objects.get(prefix=exam_prefix).no_of_questions
-                    time_per_question = Exam.objects.get(prefix=exam_prefix).time_per_question
+                    exam_obj = Exam.objects.get(prefix=exam_prefix)
+                    question_limit = exam_obj.no_of_questions
+                    time_per_question = exam_obj.time_per_question
+                    total_questions = exam_obj.no_of_questions
 
                 return Response({
                     'status': 'User logged in',
                     'is_success': True,
                     'token': user.auth_token,
                     "question_limit": question_limit,
-                    "time_per_question": time_per_question
+                    "time_per_question": time_per_question,
+                    "total_questions": total_questions
                 }, status=status.HTTP_200_OK)
 
             else:
@@ -171,8 +207,6 @@ class LoginAPIView(APIView):
             }, status=status.HTTP_404_NOT_FOUND)
 
         except Exception as e:
-            from icecream import ic
-            ic(e)
             return Response({
                 'error': str(e),
                 'is_success': False
@@ -312,8 +346,12 @@ class AddQuestionsAPIView(APIView):
                     },
                     status=status.HTTP_401_UNAUTHORIZED
                 )
+
         except Exception as e:
-            return Response(status=200, data={"hehe": str(e)})
+            return Response(
+                status=200,
+                data={"error": str(e)}
+            )
 
 
 class StoreResponseAPIView(APIView):
@@ -322,6 +360,7 @@ class StoreResponseAPIView(APIView):
         body_unicode = request.body.decode('utf-8')
         body_data = json.loads(body_unicode)
         auth_token = request.headers.get('Authorization')
+
         if auth_token == f'Bearer ' + os.getenv('ADMIN_TOKEN'):
             # Call the microservice to get questions
             microservice_url = f"{question_bank_uri}/answer/submit"
@@ -385,7 +424,7 @@ class RestExamView(APIView):
         username = request.data.get('username')
         if username is None:
             return Response({'error': 'username ID is required'}, status=status.HTTP_400_BAD_REQUEST)
-
+        # black list that auth token
         try:
             user = User.objects.get(username=username)
 
@@ -418,5 +457,5 @@ class RestExamView(APIView):
 
 
 class Ping(APIView):
-    def post(self, request):
+    def get(self, request):
         return Response({"ping": "pong"})
