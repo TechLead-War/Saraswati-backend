@@ -365,32 +365,26 @@ class StoreResponseAPIView(APIView):
 class StoreFeedbackAPIView(APIView):
 
     def post(self, request):
-        body_unicode = request.body.decode('utf-8')
-        body_data = json.loads(body_unicode)
-
-        # Call the microservice to get questions
-        microservice_url = f"{question_bank_uri}/submit/feedback"
-        headers = {
-            'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
-            'Content-Type': 'application/json'
+        response = {
+            "status": "success",
+            "message": "Feedback submitted successfully"
         }
 
-        response = requests.post(
-            microservice_url,
-            headers=headers,
-            json=body_data
+        try:
+            body_data = json.loads(request.body.decode('utf-8'))
+            response = question_bank_network_call(
+                body_data,
+                "POST",
+                "/submit/feedback"
+            )
+
+        except json.decoder.JSONDecodeError:
+            pass
+
+        return Response(
+            response,
+            status=status.HTTP_200_OK
         )
-
-        if response.status_code == 200:
-            data = {
-                "message": "Response captured successfully",
-                "status": status.HTTP_200_OK
-            }
-
-        else:
-            data = response.json()
-
-        return Response(data, status=status.HTTP_200_OK)
 
 
 class RestExamView(APIView):
