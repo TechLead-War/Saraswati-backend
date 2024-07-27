@@ -288,45 +288,16 @@ class AddQuestionsAPIView(APIView):
         try:
             body_unicode = request.body.decode('utf-8')
             body_data = json.loads(body_unicode)
-            auth_token = request.headers.get('Authorization')
 
-            if auth_token == f'Bearer ' + os.getenv('ADMIN_TOKEN'):
-                # Call the microservice to get questions
-                microservice_url = f"{question_bank_uri}/question/add"
-                headers = {
-                    'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
-                    'Content-Type': 'application/json'
-                }
-
-                response = requests.post(
-                    microservice_url,
-                    headers=headers,
-                    json=body_data
-                )
-                if response.status_code == 201:
-                    data = {
-                        "message": "Question added successfully",
-                        "status": status.HTTP_201_CREATED
-                    }
-                    status_res = status.HTTP_201_CREATED
-
-                else:
-                    data = response.json()
-                    status_res = status.HTTP_400_BAD_REQUEST
-
-                return Response(data, status=status_res)
-
-            else:
-                return Response(
-                    data={
-                        "error": "Invalid auth token"
-                    },
-                    status=status.HTTP_401_UNAUTHORIZED
-                )
+            response = question_bank_network_call(body_data, "POST", "/question/add")
+            return Response(
+                response,
+                status=status.HTTP_200_OK if response.get("message") else status.HTTP_400_BAD_REQUEST
+            )
 
         except Exception as e:
             return Response(
-                status=200,
+                status=status.HTTP_400_BAD_REQUEST,
                 data={"error": str(e)}
             )
 
@@ -418,11 +389,20 @@ class RestExamView(APIView):
                 )
 
         except User.DoesNotExist:
-            return Response({'error': 'Invalid credentials', 'is_success': False}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({
+                    'error': INVALID_CREDENTIALS,
+                    'is_success': False
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
 
         except Exception as ex:
-            print(ex)
-            return Response({'error': str(ex), 'is_success': False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({
+                    'error': str(ex),
+                    'is_success': False
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class Ping(APIView):
