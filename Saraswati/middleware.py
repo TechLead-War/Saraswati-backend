@@ -1,7 +1,7 @@
 import os
 
-from django.utils.deprecation import MiddlewareMixin
 from django.db import connection
+from django.utils.deprecation import MiddlewareMixin
 
 
 class SetSearchPathMiddleware(MiddlewareMixin):

@@ -1,13 +1,11 @@
 import csv
 import json
-import os
 import random
-import time
+
 import uuid
 from datetime import timedelta
 
 import redis
-import requests
 from dateutil import parser
 from django.db import IntegrityError, transaction
 from django.http import HttpResponse
