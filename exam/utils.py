@@ -61,7 +61,7 @@ def exception_handler_decorator(func):
     return wrapper
 
 
-def question_bank_network_call(body: dict, request_path: str):
+def question_bank_network_call(body: dict, request_type: str, request_path: str):
     # Call the microservice to get questions
     microservice_url = f"{question_bank_uri}{request_path}"
     headers = {
@@ -70,12 +70,21 @@ def question_bank_network_call(body: dict, request_path: str):
     }
 
     try:
-        response = requests.get(
-            microservice_url,
-            headers=headers,
-            params=body
-        )
-        return response.json()
+        if request_type == 'GET':
+            response = requests.get(
+                microservice_url,
+                headers=headers,
+                params=body
+            )
+            return response.json()
+
+        else:
+            response = requests.post(
+                microservice_url,
+                headers=headers,
+                json=body
+            )
+            return response.json()
 
     except Exception as e:
         return {

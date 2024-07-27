@@ -255,7 +255,9 @@ class RequestQuestionsAPIView(APIView):
         response = question_bank_network_call({
                                             "username": username,
                                             "question_limit": no_of_questions
-                                        }, "/question"
+                                        },
+            "GET",
+            "/question"
         )
 
         if not response.get("error"):
@@ -334,30 +336,30 @@ class StoreResponseAPIView(APIView):
     def post(self, request):
         body_unicode = request.body.decode('utf-8')
         body_data = json.loads(body_unicode)
-        auth_token = request.headers.get('Authorization')
 
-        # Call the microservice to get questions
-        microservice_url = f"{question_bank_uri}/answer/submit"
-        headers = {
-            'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
-            'Content-Type': 'application/json'
-        }
-        response = requests.post(
-            microservice_url,
-            headers=headers,
-            json=body_data
+        if not body_data:
+            return Response(
+                data={
+                    "error": "No data to submit",
+                    "status": status.HTTP_400_BAD_REQUEST
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        response = question_bank_network_call(body_data, "POST", "/answer/submit")
+
+        if response.get("error"):
+            return Response(
+                data={
+                    "error": response.get("error")
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response(
+            response,
+            status=status.HTTP_200_OK
         )
-
-        if response.status_code == 200:
-            data = {
-                "message": "Response captured successfully",
-                "status": status.HTTP_200_OK
-            }
-
-        else:
-            data = response.json()
-
-        return Response(data, status=status.HTTP_200_OK)
 
 
 class StoreFeedbackAPIView(APIView):
