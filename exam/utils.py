@@ -1,4 +1,7 @@
+import os
 from functools import wraps
+
+import requests
 from django.core.exceptions import FieldError
 from django.db import DatabaseError
 from rest_framework.response import Response
@@ -10,6 +13,8 @@ from .models import User, Exam
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
+
+question_bank_uri = os.getenv('QuestionBankAppURI', "http://127.0.0.1:5012")
 
 
 def exception_handler_decorator(func):
@@ -54,3 +59,25 @@ def exception_handler_decorator(func):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return wrapper
+
+
+def question_bank_network_call(body: dict, request_path: str):
+    # Call the microservice to get questions
+    microservice_url = f"{question_bank_uri}{request_path}"
+    headers = {
+        'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        response = requests.get(
+            microservice_url,
+            headers=headers,
+            params=body
+        )
+        return response.json()
+
+    except Exception as e:
+        return {
+            'error': str(e)
+        }

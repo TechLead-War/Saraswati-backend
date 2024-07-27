@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import random
+import time
 import uuid
 from datetime import timedelta
 
@@ -17,18 +18,18 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from exam.constants import USER_ALREADY_EXISTS, USER_CREATED_SUCCESSFULLY, EXAM_PREFIX_NOT_FOUND, \
-    MISSING_REQUIRED_FIELD, ALREADY_LOGGED_IN, INVALID_CREDENTIALS, CustomRedisException
+    MISSING_REQUIRED_FIELD, ALREADY_LOGGED_IN, INVALID_CREDENTIALS, CustomRedisException, USERNAME_MISSING, \
+    USER_NOT_LOGGED_IN
 from .cache import RedisManagerClient
 from .models import Exam, User
 from .serializers import CSVUploadSerializer, ExamSerializer, UserCSVSerializer
-from .utils import exception_handler_decorator
+from .utils import exception_handler_decorator, question_bank_network_call
 
 import logging
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-
-question_bank_uri = os.getenv('QuestionBankAppURI', "http://127.0.0.1:5012")
 redis_client = RedisManagerClient().client
 
 
@@ -57,10 +58,10 @@ class UserCSVUploadView(APIView):
 
         if exam_prefix == '' or exam_prefix is None:
             return Response({
-                        "error": EXAM_PREFIX_NOT_FOUND
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                "error": EXAM_PREFIX_NOT_FOUND
+            },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if serializer.is_valid():
             file = request.FILES['file']
@@ -159,20 +160,23 @@ class LoginAPIView(APIView):
                 if time_per_question is None or no_of_questions is None:
                     raise CustomRedisException()
 
+            except CustomRedisException:
+                exam_obj = Exam.objects.get(prefix=exam_prefix)
+                time_per_question = exam_obj.time_per_question
+                no_of_questions = exam_obj.no_of_questions
+
+                redis_client.set(f"tpq:{exam_prefix}", time_per_question)
+                redis_client.set(f"noq:{exam_prefix}", no_of_questions)
+
             except (
                     redis.ConnectionError,
                     redis.TimeoutError,
                     redis.RedisError,
                     AttributeError
-            ) as ex:
-                logger.info(f"Got redis error: {ex}")
+            ):
                 exam_obj = Exam.objects.get(prefix=exam_prefix)
                 time_per_question = exam_obj.time_per_question
                 no_of_questions = exam_obj.no_of_questions
-
-            except CustomRedisException as ex:
-                redis_client.set(f"tpq:{exam_prefix}", time_per_question)
-                redis_client.set(f"noq:{exam_prefix}", no_of_questions)
 
             return Response({
                 'status': 'User logged in',
@@ -183,95 +187,95 @@ class LoginAPIView(APIView):
             }, status=status.HTTP_200_OK)
 
 
-class QuestionsAPIView(APIView):
-
+class RequestQuestionsAPIView(APIView):
+    @exception_handler_decorator
     def post(self, request):
         body_unicode = request.body.decode('utf-8')
         body_data = json.loads(body_unicode)
-        username = body_data['username']
-        exam_id = username.split('_')[0] + '_'
 
         try:
-            # check if auth token is correct
+            username = body_data['username']
+
+        except KeyError:
+            return Response({
+                "error": USERNAME_MISSING,
+                "is_success": False
+            },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if '_' in username:
+            exam_prefix = username.split('_')[0] + '_'
+
+        else:
+            return Response({
+                "error": MISSING_REQUIRED_FIELD.format("exam_prefix"),
+                "is_success": False
+            },
+                status=status.HTTP_400_BAD_REQUEST)
+
+        # check if auth token is correct
+        try:
             User.objects.get(
                 auth_token=body_data.get("token"),
                 username=username
             )
 
-            try:
-                redis_response = redis_client.get(f'QL:{exam_id}')
+        except User.DoesNotExist:
+            Response({
+                    'error': USER_NOT_LOGGED_IN,
+                    'is_success': False
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-                if redis_response is None:
-                    question_limit = Exam.objects.get(
-                        prefix=exam_id
-                    ).no_of_questions
-                    # set it to redis
-                    redis_client.set(f'QL:{exam_id}', question_limit)
+        try:
+            no_of_questions = redis_client.get(f"noq:{exam_prefix}")
+            if no_of_questions is None:
+                raise CustomRedisException()
 
-                else:
-                    question_limit = redis_response
+        except CustomRedisException:
+            no_of_questions = Exam.objects.get(
+                prefix=exam_prefix
+            ).no_of_questions
 
-            except Exception as ex:
-                # redis is not reachable
-                question_limit = Exam.objects.get(
-                    prefix=exam_id
-                ).no_of_questions
+            # set it to redis
+            redis_client.set(f'noq:{exam_prefix}', no_of_questions)
 
-            # Call the microservice to get questions
-            microservice_url = f"{question_bank_uri}/question"
-            headers = {
-                'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
-                'Content-Type': 'application/json'
+        except (
+                redis.ConnectionError,
+                redis.TimeoutError,
+                redis.RedisError,
+                AttributeError
+        ):
+            no_of_questions = Exam.objects.get(
+                prefix=exam_prefix
+            ).no_of_questions
+
+        response = question_bank_network_call({
+                                            "username": username,
+                                            "question_limit": no_of_questions
+                                        }, "/question"
+        )
+
+        if not response.get("error"):
+            data = {
+                'question_id': response['question_id'],
+                'text': response['text'],
+                'options': response['options']
             }
 
-            try:
-                response = requests.get(
-                    microservice_url,
-                    headers=headers,
-                    params={
-                        "username": username,
-                        "question_limit": question_limit
-                    }
-                )
-
-            except Exception as e:
-                print(e)
-
-            if "response" in vars() and response.status_code == 200:
-                questions = response.json()
-                data = {
-                    'question_id': questions['question_id'],
-                    'text': questions['text'],
-                    'options': questions['options']
-                }
-
-            elif response.status_code == 409:
-                data = {
-                    'error': response.json(),
-                    'is_success': False
-                }
-                return Response(data, status=status.HTTP_409_CONFLICT)
-
-            else:
-                if response:
-                    data = {
-                        'error': response.json(),
-                        'is_success': False
-                    }
-                else:
-                    data = {
-                        'error': 'Failed to fetch questions from microservice',
-                        'is_success': False
-                    }
-
-        except User.DoesNotExist:
+        else:
             data = {
-                'error': 'User not logged in / or invalid token',
+                'error': response.get("error") if response else 'Failed to fetch questions from microservice',
                 'is_success': False
             }
 
         if data.get('is_success') is False:
-            return Response(data, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                data,
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         return Response(data)
 
@@ -412,9 +416,9 @@ class RestExamView(APIView):
 
             else:
                 return Response({
-                        'error': 'Already never logged in.',
-                        'is_success': False
-                    }, status=status.HTTP_200_OK
+                    'error': 'Already never logged in.',
+                    'is_success': False
+                }, status=status.HTTP_200_OK
                 )
 
         except User.DoesNotExist:
