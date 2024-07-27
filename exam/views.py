@@ -8,8 +8,7 @@ from datetime import timedelta
 import redis
 import requests
 from dateutil import parser
-from django.core.exceptions import FieldError
-from django.db import IntegrityError, DatabaseError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import generics, status
@@ -18,11 +17,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from exam.constants import USER_ALREADY_EXISTS, USER_CREATED_SUCCESSFULLY, EXAM_PREFIX_NOT_FOUND, \
-    MISSING_REQUIRED_FIELD, ALREADY_LOGGED_IN, INVALID_CREDENTIALS
+    MISSING_REQUIRED_FIELD, ALREADY_LOGGED_IN, INVALID_CREDENTIALS, CustomRedisException
 from .cache import RedisManagerClient
 from .models import Exam, User
 from .serializers import CSVUploadSerializer, ExamSerializer, UserCSVSerializer
 from .utils import exception_handler_decorator
+
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+
 
 question_bank_uri = os.getenv('QuestionBankAppURI', "http://127.0.0.1:5012")
 redis_client = RedisManagerClient().client
@@ -121,96 +125,62 @@ class ExamCreateView(generics.CreateAPIView):
 
 
 class LoginAPIView(APIView):
+    @exception_handler_decorator
     def post(self, request):
         username = request.data.get('username')
         exam_prefix = username.split('_')[0] + '_'
 
-        try:
-            user = User.objects.get(username=username)
+        if username is None or username == '':
+            return Response(
+                {
+                    'error': MISSING_REQUIRED_FIELD,
+                    'is_success': False
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():  # so entire code can be roll back
+            user = User.objects.select_for_update().get(username=username)  # locks the row in DB
             if user.last_logged_in is None:
                 user.last_logged_in = timezone.now()
                 user.auth_token = uuid.uuid4().hex
                 user.save()
 
-                try:
-                    question_limits = redis_client.get(exam_prefix)
-                    time_per_question = redis_client.get(f"tpq:{exam_prefix}")
-                    total_questions = redis_client.get(f"tq:{exam_prefix}")
-
-                    if question_limits is None:
-                        question_limit = Exam.objects.get(prefix=exam_prefix).no_of_questions
-                        redis_client.set(exam_prefix, question_limit)
-                    else:
-                        question_limit = int(question_limits)
-
-                    if time_per_question is None:
-                        time_per_question = Exam.objects.get(prefix=exam_prefix).time_per_question
-                        redis_client.set(f"tpq:{exam_prefix}", time_per_question)
-                    else:
-                        time_per_question = int(time_per_question)
-
-                    if total_questions is None:
-                        total_questions = Exam.objects.get(prefix=exam_prefix).total_questions
-                        redis_client.set(f"tq:{exam_prefix}", total_questions)
-
-                    else:
-                        total_questions = int(time_per_question)
-
-                except (
-                        redis.ConnectionError,
-                        redis.TimeoutError,
-                        redis.RedisError,
-                        AttributeError
-                ):
-                    exam_obj = Exam.objects.get(prefix=exam_prefix)
-                    question_limit = exam_obj.no_of_questions
-                    time_per_question = exam_obj.time_per_question
-                    total_questions = exam_obj.no_of_questions
-
-                return Response({
-                    'status': 'User logged in',
-                    'is_success': True,
-                    'token': user.auth_token,
-                    "question_limit": question_limit,
-                    "time_per_question": time_per_question,
-                    "total_questions": total_questions
-                }, status=status.HTTP_200_OK)
-
             else:
                 return Response({
-                    'error': 'Already logged in',
+                    'error': ALREADY_LOGGED_IN,
                     'is_success': False
-                }, status=status.HTTP_200_OK)
+                }, status=status.HTTP_406_NOT_ACCEPTABLE)
 
-        except User.DoesNotExist:
-            return Response({
-                'error': 'Invalid credentials',
-                'is_success': False
-            }, status=status.HTTP_401_UNAUTHORIZED)
+            try:
+                time_per_question = redis_client.get(f"tpq:{exam_prefix}")
+                no_of_questions = redis_client.get(f"tq:{exam_prefix}")
 
-        except Exam.MultipleObjectsReturned:
-            return Response({
-                'error': 'Multiple Exam entries found with the given prefix.',
-                'is_success': False
-            }, status=status.HTTP_409_CONFLICT)
+                if time_per_question is None or no_of_questions is None:
+                    raise CustomRedisException()
 
-        except FieldError:
-            return Response({
-                'error': 'Field error in query.',
-                'is_success': False
-            }, status=status.HTTP_404_NOT_FOUND)
+            except (
+                    redis.ConnectionError,
+                    redis.TimeoutError,
+                    redis.RedisError,
+                    AttributeError
+            ) as ex:
+                logger.info(f"Got redis error: {ex}")
+                exam_obj = Exam.objects.get(prefix=exam_prefix)
+                time_per_question = exam_obj.time_per_question
+                no_of_questions = exam_obj.no_of_questions
 
-        except DatabaseError:
-            return Response({
-                'error': 'Database error occurred.',
-                'is_success': False
-            }, status=status.HTTP_404_NOT_FOUND)
+            except CustomRedisException as ex:
+                redis_client.set(f"tpq:{exam_prefix}", time_per_question)
+                redis_client.set(f"noq:{exam_prefix}", no_of_questions)
 
-        except Exception as e:
             return Response({
-                'error': str(e),
-                'is_success': False
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                'status': 'User logged in',
+                'is_success': True,
+                'token': user.auth_token,
+                "time_per_question": time_per_question,
+                "total_questions": no_of_questions
+            }, status=status.HTTP_200_OK)
 
 
 class QuestionsAPIView(APIView):
@@ -241,7 +211,7 @@ class QuestionsAPIView(APIView):
                 else:
                     question_limit = redis_response
 
-            except Exception:
+            except Exception as ex:
                 # redis is not reachable
                 question_limit = Exam.objects.get(
                     prefix=exam_id
@@ -253,6 +223,7 @@ class QuestionsAPIView(APIView):
                 'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
                 'Content-Type': 'application/json'
             }
+
             try:
                 response = requests.get(
                     microservice_url,
@@ -264,7 +235,7 @@ class QuestionsAPIView(APIView):
                 )
 
             except Exception as e:
-                pass
+                print(e)
 
             if "response" in vars() and response.status_code == 200:
                 questions = response.json()
@@ -361,29 +332,28 @@ class StoreResponseAPIView(APIView):
         body_data = json.loads(body_unicode)
         auth_token = request.headers.get('Authorization')
 
-        if auth_token == f'Bearer ' + os.getenv('ADMIN_TOKEN'):
-            # Call the microservice to get questions
-            microservice_url = f"{question_bank_uri}/answer/submit"
-            headers = {
-                'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
-                'Content-Type': 'application/json'
+        # Call the microservice to get questions
+        microservice_url = f"{question_bank_uri}/answer/submit"
+        headers = {
+            'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
+            'Content-Type': 'application/json'
+        }
+        response = requests.post(
+            microservice_url,
+            headers=headers,
+            json=body_data
+        )
+
+        if response.status_code == 200:
+            data = {
+                "message": "Response captured successfully",
+                "status": status.HTTP_200_OK
             }
-            response = requests.post(
-                microservice_url,
-                headers=headers,
-                json=body_data
-            )
 
-            if response.status_code == 200:
-                data = {
-                    "message": "Response captured successfully",
-                    "status": status.HTTP_200_OK
-                }
+        else:
+            data = response.json()
 
-            else:
-                data = response.json()
-
-            return Response(data, status=status.HTTP_200_OK)
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class StoreFeedbackAPIView(APIView):
@@ -391,32 +361,30 @@ class StoreFeedbackAPIView(APIView):
     def post(self, request):
         body_unicode = request.body.decode('utf-8')
         body_data = json.loads(body_unicode)
-        auth_token = request.headers.get('Authorization')
 
-        if auth_token == f'Bearer ' + os.getenv('ADMIN_TOKEN'):
-            # Call the microservice to get questions
-            microservice_url = f"{question_bank_uri}/submit/feedback"
-            headers = {
-                'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
-                'Content-Type': 'application/json'
+        # Call the microservice to get questions
+        microservice_url = f"{question_bank_uri}/submit/feedback"
+        headers = {
+            'Authorization': f'Bearer {os.getenv("ADMIN_TOKEN")}',  # Add the admin token in the headers
+            'Content-Type': 'application/json'
+        }
+
+        response = requests.post(
+            microservice_url,
+            headers=headers,
+            json=body_data
+        )
+
+        if response.status_code == 200:
+            data = {
+                "message": "Response captured successfully",
+                "status": status.HTTP_200_OK
             }
 
-            response = requests.post(
-                microservice_url,
-                headers=headers,
-                json=body_data
-            )
+        else:
+            data = response.json()
 
-            if response.status_code == 200:
-                data = {
-                    "message": "Response captured successfully",
-                    "status": status.HTTP_200_OK
-                }
-
-            else:
-                data = response.json()
-
-            return Response(data, status=status.HTTP_200_OK)
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class RestExamView(APIView):
@@ -452,8 +420,9 @@ class RestExamView(APIView):
         except User.DoesNotExist:
             return Response({'error': 'Invalid credentials', 'is_success': False}, status=status.HTTP_401_UNAUTHORIZED)
 
-        except Exception as e:
-            return Response({'error': str(e), 'is_success': False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as ex:
+            print(ex)
+            return Response({'error': str(ex), 'is_success': False}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class Ping(APIView):
