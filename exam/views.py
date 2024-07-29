@@ -46,14 +46,13 @@ class UserCSVExportView(APIView):
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="users.csv"'
 
-        # Write CSV data
         writer = csv.writer(response)
         for user in serializer.data:
             writer.writerow([
                 user.get('student_name', ''),
                 user.get('university_email', ''),
                 user.get('university_id', ''),
-                user.get('marks', '')  # Include other fields as needed
+                user.get('marks', '')
             ])
 
         return response
