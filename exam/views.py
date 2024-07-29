@@ -65,6 +65,7 @@ class UserCSVUploadView(APIView):
             file = request.FILES['file']
             decoded_file = file.read().decode('utf-8').splitlines()
             reader = csv.DictReader(decoded_file)
+            users_to_create = []
 
             try:
                 for row in reader:
@@ -75,7 +76,8 @@ class UserCSVUploadView(APIView):
                         exam_prefix=exam_prefix,
                         username=exam_prefix + row['university_id']
                     )
-                    user.save()
+                    users_to_create.append(user)
+                User.objects.bulk_create(users_to_create)
 
             except IntegrityError as ex:
                 return Response({
