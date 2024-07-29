@@ -5,8 +5,8 @@ from .views import (AddQuestionsAPIView, ExamCreateView, LoginAPIView, Ping,
                     StoreResponseAPIView, UserCSVExportView, UserCSVUploadView, RequestQuestionsAPIView)
 
 urlpatterns = [
-    path('api/export/users/', UserCSVExportView.as_view(), name='export_users_csv'),
-    path('api/upload/users/', UserCSVUploadView.as_view(), name='upload_users_csv'),
+    path('api/export/users', UserCSVExportView.as_view(), name='export_users_csv'),
+    path('api/upload/users', UserCSVUploadView.as_view(), name='upload_users_csv'),
     path('api/create_exam/', ExamCreateView.as_view(), name='exam_create'),
     path('api/login', LoginAPIView.as_view(), name='login'),
     path('api/question', RequestQuestionsAPIView.as_view(), name='fetch_questions'),

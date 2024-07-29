@@ -22,6 +22,7 @@ from .cache import RedisManagerClient
 from .models import Exam, User
 from .serializers import CSVUploadSerializer, ExamSerializer, UserCSVSerializer
 from .utils import exception_handler_decorator, question_bank_network_call
+from django.core.paginator import Paginator
 
 import logging
 
@@ -33,16 +34,27 @@ redis_client = RedisManagerClient().client
 
 class UserCSVExportView(APIView):
     def get(self, request):
-        # get student data in desc order of marks
-        users = User.objects.all().order_by('-marks')
-        serializer = UserCSVSerializer(users, many=True)
+        page_number = request.GET.get('page', 1)
+        items_per_page = 100
 
+        users = User.objects.all().order_by('-marks')
+
+        paginator = Paginator(users, items_per_page)
+        page = paginator.get_page(page_number)
+
+        serializer = UserCSVSerializer(page.object_list, many=True)
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="users.csv"'
 
+        # Write CSV data
         writer = csv.writer(response)
         for user in serializer.data:
-            writer.writerow([user])
+            writer.writerow([
+                user.get('student_name', ''),
+                user.get('university_email', ''),
+                user.get('university_id', ''),
+                user.get('marks', '')  # Include other fields as needed
+            ])
 
         return response
 
