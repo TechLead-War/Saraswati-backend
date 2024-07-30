@@ -1,8 +1,9 @@
 from django.urls import path
 
 from .views import (AddQuestionsAPIView, ExamCreateView, LoginAPIView, Ping,
-                    RestExamView, StoreFeedbackAPIView,
-                    StoreResponseAPIView, UserCSVExportView, UserCSVUploadView, RequestQuestionsAPIView)
+                    StoreFeedbackAPIView, StoreResponseAPIView, UserCSVExportView,
+                    UserCSVUploadView, RequestQuestionsAPIView, RestStudentExamView
+)
 
 urlpatterns = [
     path('api/export/users', UserCSVExportView.as_view(), name='export_users_csv'),
@@ -13,6 +14,6 @@ urlpatterns = [
     path('api/question/add', AddQuestionsAPIView.as_view(), name='add_questions'),
     path('api/answer/submit', StoreResponseAPIView.as_view(), name='capture_response'),
     path('api/submit/feedback', StoreFeedbackAPIView.as_view(), name='capture_response'),
-    path('api/exam/rest', RestExamView.as_view(), name='reset_exam'),
+    path('api/exam/rest', RestStudentExamView.as_view(), name='reset_exam'),
     path('api/ping', Ping.as_view(), name='ping')
 ]

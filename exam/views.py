@@ -233,7 +233,7 @@ class RequestQuestionsAPIView(APIView):
             )
 
         except User.DoesNotExist:
-            Response({
+            return Response({
                     'error': USER_NOT_LOGGED_IN,
                     'is_success': False
                 },
@@ -369,7 +369,7 @@ class StoreFeedbackAPIView(APIView):
         )
 
 
-class RestExamView(APIView):
+class RestStudentExamView(APIView):
     def post(self, request):
         username = request.data.get('username')
         if username is None:
@@ -385,6 +385,14 @@ class RestExamView(APIView):
                 user.reset_count = user.reset_count + 1
                 user.save()
 
+                # reset all answered questions from this username
+                question_bank_network_call(
+                    {
+                        "username": username
+                    },
+                    "POST",
+                    "/reset/student/answers"
+                )
                 return Response({
                     'status': 'User reset done!',
                     'is_success': True,
@@ -394,9 +402,9 @@ class RestExamView(APIView):
 
             else:
                 return Response({
-                    'error': 'Already never logged in.',
-                    'is_success': False
-                }, status=status.HTTP_200_OK
+                        'error': 'Already never logged in.',
+                        'is_success': False
+                    }, status=status.HTTP_200_OK
                 )
 
         except User.DoesNotExist:
