@@ -38,7 +38,7 @@ class User(models.Model):
     university_email = models.EmailField(default="None")
     reset_count = models.IntegerField(default=0)
     exam_prefix = models.CharField(max_length=3, default="NA")
-    username = models.CharField(max_length=10, default="NA", unique=True)
+    username = models.CharField(max_length=15, default="NA", unique=True)
 
     def __str__(self):
         return self.username
